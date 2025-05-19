@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Chat WebRTC</title>
+  <style>
+    video {
+      width: 45%;
+      border: 1px solid #333;
+      margin: 5px;
+    }
+    #videos {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    #buttons {
+      margin-top: 10px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h2>Video Chat WebRTC with Supabase</h2>
+
+  <div id="videos">
+    <video id="localVideo" autoplay muted></video>
+    <video id="remoteVideo" autoplay></video>
+  </div>
+
+  <div id="buttons">
+    <button id="startBtn">Start Call</button>
+    <button id="hangupBtn" disabled>Hang Up</button>
+  </div>
+
+  <script type="module">
+    const SUPABASE_URL = 'https://hojusclnvrtdrltlatns.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhvanVzY2xudnJ0ZHJsdGxhdG5zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDc1MzM5MjEsImV4cCI6MjA2MzEwOTkyMX0.3KbCs_WNnmEtW9AlIAI7_laLMV6QRi6jNSYyBrId-1E';
+
+    import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm';
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    let localStream = null;
+    let peerConnection = null;
+    const config = {
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    };
+
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const startBtn = document.getElementById('startBtn');
+    const hangupBtn = document.getElementById('hangupBtn');
+
+    let channelName = 'webrtc-channel';
+    let subscription = null;
+
+    startBtn.onclick = startCall;
+    hangupBtn.onclick = hangUp;
+
+    async function startCall() {
+      startBtn.disabled = true;
+
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localVideo.srcObject = localStream;
+
+      peerConnection = new RTCPeerConnection(config);
+      localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+      peerConnection.ontrack = event => {
+        if (remoteVideo.srcObject !== event.streams[0]) {
+          remoteVideo.srcObject = event.streams[0];
+        }
+      };
+
+      peerConnection.onicecandidate = async event => {
+        if (event.candidate) {
+          await supabase.channel(channelName).send({
+            type: 'broadcast',
+            event: 'ice-candidate',
+            payload: JSON.stringify(event.candidate)
+          });
+        }
+      };
+
+      subscription = supabase
+        .channel(channelName)
+        .on('broadcast', { event: 'offer' }, async (payload) => {
+          const offer = JSON.parse(payload.payload);
+          await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+          const answer = await peerConnection.createAnswer();
+          await peerConnection.setLocalDescription(answer);
+
+          await supabase.channel(channelName).send({
+            type: 'broadcast',
+            event: 'answer',
+            payload: JSON.stringify(answer)
+          });
+        })
+        .on('broadcast', { event: 'answer' }, async (payload) => {
+          const answer = JSON.parse(payload.payload);
+          await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+        })
+        .on('broadcast', { event: 'ice-candidate' }, async (payload) => {
+          const candidate = JSON.parse(payload.payload);
+          try {
+            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+          } catch (e) {
+            console.error('Error adding ICE candidate', e);
+          }
+        })
+        .subscribe();
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+
+      await supabase.channel(channelName).send({
+        type: 'broadcast',
+        event: 'offer',
+        payload: JSON.stringify(offer)
+      });
+
+      hangupBtn.disabled = false;
+    }
+
+    function hangUp() {
+      if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+      }
+      if (subscription) {
+        subscription.unsubscribe();
+        subscription = null;
+      }
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+      }
+
+      localVideo.srcObject = null;
+      remoteVideo.srcObject = null;
+
+      startBtn.disabled = false;
+      hangupBtn.disabled = true;
+    }
+  </script>
+</body>
+</html>
